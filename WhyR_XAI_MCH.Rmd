@@ -1,0 +1,1087 @@
+---
+title: "Black is the new White"
+author: "Marcin Chlebus, PhD (WNE UW, Data Juice Lab, Data Donuts)"
+date: "27.09.2019"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+During the workshop my best practices in modeleing business decison would be presented.
+
+Uploading libraries and setting english
+
+```{r warning=FALSE}
+
+  #setting language
+  Sys.setenv(LANG = "en") 
+
+  #api for Open ML DB repo and dependencies
+ 
+  library(OpenML)
+  library(farff)
+  library(readr)
+
+  #libraries for manipulating data and visualsation
+
+  library(dplyr)
+  library(ggplot2)
+  library(DescTools)
+
+  #performance measures for classification issues
+
+  library(caTools)
+  library(pROC)
+  library(OptimalCutpoints)
+
+  #library for modeling
+
+  library(caret)
+
+  #XAI libraries
+
+  library(vip)
+  library(lime)
+  library(DALEX)
+  library(ingredients)
+  library(iBreakDown)
+  library(factorMerger)
+```
+
+###Use Case based on marketing data from a bank
+
+Data is coming from:
+
+S. Moro, R. Laureano and P. Cortez. Using Data Mining for Bank Direct Marketing: An Application of the CRISP-DM Methodology. In P. Novais et al. (Eds.), Proceedings of the European Simulation and Modelling Conference - ESM'2011, pp. 117-121, Guimaraes, Portugal, October, 2011. EUROSIS.
+
+###Data description
+
+The data is related to direct marketing campaigns of a Portuguese banking institution. 
+
+The marketing campaigns were based on phone calls. Often, more than one contact to the same client was required, in order to access if the product (bank term deposit) would be (or not) subscribed.
+
+The classification goal is to predict if the client will subscribe a term deposit (variable y).
+
+Input variables:
+
+  Bank client data:
+  
+    Socjo-demo:
+  
+    1 - age (numeric)
+  
+   
+    
+    3 - marital : marital status (categorical: "married",
+                                               "divorced",
+                                               "single"; note: "divorced" means divorced or widowed)
+    
+    4 - education (categorical: "unknown",
+                                "secondary",
+                                "primary",
+                                "tertiary")
+    Job:
+                                
+    2 - job : type of job (categorical: "admin.",
+          "unknown",
+          "unemployed",
+          "management",
+          "housemaid",
+          "entrepreneur",
+          "student",
+          "blue-collar",
+          "self-employed",
+          "retired",
+          "technician",
+          "services")
+     6 - balance: average yearly balance, in euros (numeric)
+     
+    Credit hitory:
+    
+     5 - default: has credit in default? (binary: "yes","no")
+    
+    
+    
+     7 - housing: has housing loan? (binary: "yes","no")
+    
+     8 - loan: has personal loan? (binary: "yes","no")
+
+  Related to contacts of the current campaign:
+
+    Actual Campaign
+  
+    9 - contact: contact communication type (categorical: "unknown",
+                                                          "telephone",
+                                                          "cellular")
+    
+    10 - day: last contact day of the month (numeric)
+    
+    11 - month: last contact month of year (categorical: "jan", "feb", "mar", ..., "nov", "dec")
+    
+    12 - duration: last contact duration, in seconds (numeric)
+    
+    13 - campaign: number of contacts performed during this campaign and for this client (numeric)
+
+
+    Previous Campaign
+    
+    14 - pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric, -1 not previously contacted)
+    
+    15 - previous: number of contacts performed before this campaign and for this client (numeric)
+    
+    16 - poutcome: outcome of the previous marketing campaign (categorical: "unknown",
+                                                                            "other",
+                                                                            "failure",
+                                                                            "success")
+Target Variable
+
+    17 - Class - has the client subscribed a term deposit? (binary: "yes","no")
+
+
+
+Data is imported from Open ML repository via R api
+```{r message=FALSE, warning=FALSE}
+mkgt_OpenML <- getOMLDataSet(data.id = 1461)
+mkgt <- mkgt_OpenML$data
+colnames(mkgt) <-c("age","job","marital","educ","def","balance","housing","loan","contact","day","month","duration","campaign", "pdays", "previous", "poutcome","class")
+mkgt %>% as_tibble()
+
+```
+
+EDA for all variables using Desc() form DescTools.
+
+Importat issues:
+
+    0. Type of variables
+    1. Missings
+    2. Outliers (Skewness/Kurtosis)
+    3. Large number of levels factors
+    4. Special values
+    5. Target variable (imbalnace?)
+
+
+```{r message=FALSE, warning=FALSE}
+options(scipen = 99)
+Desc(mkgt$age, plotit=T)
+Desc(mkgt$marital, plotit=T)
+Desc(mkgt$educ, plotit=T)
+
+Desc(mkgt$job, plotit=T)
+Desc(mkgt$balance, plotit=T)
+
+Desc(mkgt$def, plotit=T)
+Desc(mkgt$housing, plotit=T)
+Desc(mkgt$loan, plotit=T)
+
+Desc(mkgt$contact, plotit=T)
+Desc(mkgt$day, plotit=T)
+Desc(mkgt$month, plotit=T)
+Desc(mkgt$duration, plotit=T)
+Desc(mkgt$campaign, plotit=T)
+
+Desc(mkgt$pdays, plotit=T)
+Desc(mkgt$previous, plotit=T)
+Desc(mkgt$poutcome, plotit=T)
+
+Desc(mkgt$class, plotit=T)
+
+
+```
+
+### Splitting data into train and test sample. 
+
+Here without stratification. However, I ussually stratifies over target at least.
+
+```{r}
+set.seed(1916)
+sample <- sample.split(mkgt$class, SplitRatio=0.7)
+train <-mkgt[sample,]
+test <- mkgt[!sample,]
+```
+
+### Training Logistic Regression using Caret
+
+```{r}
+
+# preparing target for Caret
+
+train$class <- factor(ifelse(train$class==1,"Failure","Success"))
+test$class <- factor(ifelse(test$class==1,"Failure","Success"))
+
+# #train logistic regression
+# 
+#  LR <- train(class~.,
+#             data=train,
+#             method='glm',
+#             trControl=trainControl(summaryFunction=twoClassSummary,
+#                                    classProbs = TRUE,
+#                                    method="cv",
+#                                    number=10),
+#             metric="ROC")
+# 
+# 
+# saveRDS(LR, file = "LR.rds")
+
+LR<-readRDS(file = "LR.rds")
+
+summary(LR)
+
+```
+Before assessment of a quality of the model Optimal Cut-Off should be find. Otherwise very often all measures using 0/1 prediction are not presenting real quality of the model (imbalance data)
+
+```{r message=FALSE, warning=FALSE}
+#prediction probability based on LR
+
+pred_LR<-predict(LR, test, "prob")[,2]
+test$pred_LR<-pred_LR
+
+#numeric verison of the target
+
+test$class1<-ifelse(test$class=="Success",1,0)
+
+#findig an optimal cut-off point 
+opt_LR_ROC01<-optimal.cutpoints(X = "pred_LR", 
+                                status = "class1", 
+                                tag.healthy = 1, 
+                                direction=">",
+                                methods = "ROC01", 
+                                data = test, 
+                                ci.fit = TRUE, 
+                                conf.level = 0.95, 
+                                trace = T)
+
+opt_LR_ROC01
+```
+LR model assessment
+```{r}
+
+#gini
+
+2*ci.auc(test$class,pred_LR)-1
+
+#confusion matrices for different cut-offs
+
+mean(test$class1)
+confusionMatrix(factor(ifelse(pred_LR>mean(test$class1),"Success","Failure")),test$class,positive ="Success")
+confusionMatrix(factor(ifelse(pred_LR>0.1046,"Success","Failure")), test$class, positive ="Success")
+confusionMatrix(factor(ifelse(pred_LR>0.5,"Success","Failure")),test$class,positive ="Success")
+```
+
+Random Forest training using Caret
+
+```{r warning=FALSE}
+
+  # start_time <- Sys.time()
+  # RF <- train(class~.,
+  #             data=train,
+  #             method='ranger',
+  #             trControl=trainControl(summaryFunction=twoClassSummary,
+  #                                    classProbs = TRUE,
+  #                                    method="cv",
+  #                                    number=10,
+  #                                    search = "random"),
+  #             metric='ROC',
+  #             tuneLength = 30,
+  #             importance = 'impurity',
+  #             verbose = TRUE)
+  # 
+  # end_time <- Sys.time()
+  # rf_time<-end_time - start_time
+  # #Time difference of 1.603467 hours
+
+
+  # saveRDS(RF, file = "RF_caret.rds")
+
+RF<-readRDS(file = "RF_caret.rds")
+```
+
+Caret has a few very useful results kept that helps to understand how the moedel was tunned
+
+
+Plots showing how AUC is changing while different parameters have been checked.
+
+
+```{r}
+# plot showing results depending on tunning parameters
+ggplot(RF) + theme(legend.position = "top")
+
+```
+Conclusions:
+  1. Small number of randomly selected predictors make models poorer
+  2. Node size has not a big influence on model quality
+  3. Splitrules neither 
+
+Density plot for AUC for the best model (based on CV results)
+
+```{r}
+trellis.par.set(caretTheme())
+densityplot(RF, pch = "|")
+```
+
+Conclusions:
+1. Potentialy 2 groups of results (not big difference)
+
+
+Optimal cut-off point search for RF
+
+```{r message=FALSE, warning=FALSE}
+pred_RF<-predict(RF, test, "prob")[,2]
+test$pred_RF<-pred_RF
+
+opt_RF_ROC01<-optimal.cutpoints(X = "pred_RF", 
+                                status = "class1", 
+                                tag.healthy = 1, 
+                                direction=">",
+                                methods = "ROC01", 
+                                data = test, 
+                                ci.fit = TRUE, 
+                                conf.level = 0.95, 
+                                trace = T)
+
+
+```
+
+```{r}
+#results fo cut-off optimilasation
+opt_RF_ROC01
+```
+
+
+Gini and Confusion matrix metrics results
+
+```{r}
+#gini
+2*ci.auc(test$class,pred_RF)-1
+
+#confusion matrices metrics
+mean(pred_RF)
+confusionMatrix(factor(ifelse(pred_RF>mean(test$class1),"Success","Failure")),test$class,positive ="Success")
+confusionMatrix(factor(ifelse(pred_RF>0.1526,"Success","Failure")), test$class, positive ="Success")
+confusionMatrix(factor(ifelse(pred_RF>0.63,"Success","Failure")),test$class,positive ="Success")
+```
+
+Finding simpler RF model close to the best solution 
+
+```{r}
+RF$results %>% select(min.node.size,mtry,splitrule,ROC, ROCSD)%>% arrange(desc(ROC))
+```
+
+```{r}
+# Simpler model with good enough quality
+
+simpleRF <- tolerance(RF$results, metric = "ROC", 
+                         tol = 2, maximize = TRUE) 
+
+cat("best model within 2 pct of best:\n")
+RF$results[simpleRF,1:4]
+```
+
+### Training XGB with Caret
+
+```{r}
+  # start_time <- Sys.time()
+  # 
+  # 
+  # XGB <- train(class~., 
+  #             data=train,
+  #             method='xgbTree', 
+  #             trControl=trainControl
+  #             (summaryFunction=twoClassSummary,
+  #                                    classProbs = TRUE,
+  #                                    method="cv", 
+  #                                    number=10, 
+  #                                    search = "random"),
+  #             metric = "ROC",
+  #             tuneLength = 30,
+  #             resamples = "all",
+  #             verbose = TRUE)
+  # 
+  # 
+  # 
+  # saveRDS(XGB, file = "XGB.rds")
+XGB<-readRDS(file = "XGB.rds")
+```
+
+Hyperparameter tuning results
+```{r}
+# plot showing results depending on tunning parameters
+ggplot(XGB) + theme(legend.position = "top")
+```
+Conclusions:
+  
+    1. Very hard to identify storng patterns
+    2. Max tree depth - should be higher than 5
+    3. Shrinkage - not higher than 0.2
+    4. Subsamples Percentage - higher than 0.6
+
+
+
+AUC density plot
+```{r message=FALSE, warning=FALSE}
+trellis.par.set(caretTheme())
+densityplot(XGB, pch = "|")
+```
+
+Optimal cut-off results for XGB
+```{r message=FALSE, warning=FALSE}
+pred_XGB<-predict(XGB, test, "prob")[,2]
+test$pred_XGB<-pred_XGB
+# test$class1<-ifelse(test$class=="X1",1,0)
+
+opt_XGB_ROC01<-optimal.cutpoints(X = "pred_XGB", 
+                                 status = "class1", 
+                                 tag.healthy = 1, 
+                                 direction=">",
+                                 methods = "ROC01", 
+                                 data = test, 
+                                 ci.fit = TRUE, 
+                                 conf.level = 0.95, 
+                                 trace = T)
+
+opt_XGB_ROC01
+```
+
+
+Gini and confusion matrices metrics
+```{r}
+2*ci.auc(test$class,pred_XGB)-1
+
+mean(pred_XGB)
+confusionMatrix(factor(ifelse(pred_XGB>mean(test$class1),"Success","Failure")),test$class,positive ="Success")
+confusionMatrix(factor(ifelse(pred_XGB>0.1248,"Success","Failure")), test$class, positive ="Success")
+confusionMatrix(factor(ifelse(pred_XGB>0.63,"Success","Failure")),test$class,positive ="Success")
+```
+
+
+Finding simpler XGB model close to the best solution
+
+```{r tidy: (TRUE)}
+XGB$results %>% select(eta,max_depth,gamma,colsample_bytree,min_child_weight,subsample,nrounds,ROC, ROCSD) %>% arrange(desc(ROC))
+```
+
+```{r}
+simpleXGB <- tolerance(XGB$results, metric = "ROC", 
+                       tol = 1, maximize = T) 
+
+cat("best model within 2 pct of best:\n")
+XGB$results[simpleRF,1:8]
+
+```
+
+
+
+
+```{r}
+
+#summary of all resample results
+
+resamps <- resamples(list(LR = LR,
+                          RF = RF,
+                          XGB=XGB))
+resamps
+summary(resamps)
+
+```
+
+Comparison of AUC for all 3 models
+```{r message=FALSE, warning=FALSE}
+trellis.par.set(caretTheme())
+dotplot(resamps, metric = "ROC")
+```
+Conclusions:
+  1. RF and XGB comparable
+  2. LR poorer
+
+
+
+Copmparison of AUC for all 3 models
+```{r}
+splom(resamps)
+```
+Conclusions:
+  1. XGB and RF always better than LR
+  2. XGB and RF similar
+  
+  
+  
+  
+#XAI - how  can we use it?
+
+Creating explainers
+
+```{r}
+start<-Sys.time()
+
+# Creating the explainers
+
+# in dataset only features should be included
+cols<-c("age","job","marital","educ","def","balance","housing","loan","contact","day", "month","duration","campaign","pdays","previous","poutcome")
+
+#prediction function
+p_fun <- function(object, newdata){predict(object, newdata=newdata, type="prob")[,2]}
+
+#target variable
+yTest<-ifelse(test$class=="Success",1,0)
+
+# Creating explainers for model - DALEX
+
+explainer_rf <- explain(RF,
+                        data = test[,cols],
+                        y =yTest,
+                        predict_function = p_fun,
+                        label = 'rf')
+
+explainer_lr <- explain(LR,
+                        data = test[,cols],
+                        y =yTest,
+                        predict_function = p_fun,
+                        label = 'lr')
+
+explainer_xgb <- explain(XGB,
+                         data = test[,cols],
+                         y =yTest,
+                         predict_function = p_fun,
+                        label = 'xgb')
+
+
+stop<-Sys.time()
+
+stop-start
+```
+
+##Global explanation
+
+###Feature Importance
+
+Feature importance from Caret - case specific
+
+
+```{r message=FALSE, warning=FALSE}
+#Feature importance from Caret - case specific
+
+
+#variable importance for the lr, rf and xgb models
+  
+# vip package
+vip(LR)
+vip(RF)
+vip(XGB)
+ 
+```
+
+Feature importance from Ingridients - permutation based
+
+```{r message=FALSE, warning=FALSE}
+
+#Feature importance from Ingridients - permutation based
+  
+
+  piv_rf <-ingredients::feature_importance(explainer_rf,loss_one_minus_auc)
+  piv_lr <-ingredients::feature_importance(explainer_lr,loss_one_minus_auc)
+  piv_xgb <-ingredients::feature_importance(explainer_xgb,loss_one_minus_auc)
+
+  plot(piv_rf, piv_lr, piv_xgb)
+  
+ 
+```
+
+Conclusions:
+  
+    1. XGB slightly beter than RF, LR poorer
+    2. In all cases Duration is the most important, than Month, Contact, Poutcome, Day, ...
+    3. XGB is the most affected by Duration
+    4. Siginifcant drop after a few first variables
+
+
+Feature importance from Ingredients with Aspects - permutation based
+
+```{r}
+ #Feature importance from Ingridients with Aspects
+
+  piv_rf_asp <-ingredients::feature_importance(explainer_rf,
+                                           loss_function = loss_one_minus_auc,
+                                           variable_groups =list(
+                                             "client" = c("age",  
+                                                          "marital", 
+                                                          "educ"),
+                                             "work" = c("job","balance"),
+                                             "credit" = c("def", 
+                                                          "housing", 
+                                                          "loan"),
+                                             "current_campaign" = c("contact", 
+                                                                    "day", 
+                                                                    "month", 
+                                                                    "duration",
+                                                                    "campaign"),
+                                              "previous_campaign" = c("pdays",
+                                                                      "previous",
+                                                                      "poutcome")))
+  piv_lr_asp <-ingredients::feature_importance(explainer_lr,
+                                               loss_function = loss_one_minus_auc,
+                                               variable_groups =list(
+                                                 "client" = c("age",  
+                                                              "marital", 
+                                                              "educ"),
+                                                 "work" = c("job","balance"),
+                                                 "credit" = c("def", 
+                                                              "housing", 
+                                                              "loan"),
+                                                 "current_campaign" = c("contact", 
+                                                                        "day", 
+                                                                        "month", 
+                                                                        "duration",
+                                                                        "campaign"),
+                                                  "previous_campaign" = c("pdays",
+                                                                          "previous",
+                                                                          "poutcome")))
+  
+  piv_xgb_asp <-ingredients::feature_importance(explainer_xgb,
+                                           loss_function = loss_one_minus_auc,
+                                           variable_groups =list(
+                                             "client" = c("age",  
+                                                          "marital", 
+                                                          "educ"),
+                                             "work" = c("job","balance"),
+                                             "credit" = c("def", 
+                                                          "housing", 
+                                                          "loan"),
+                                             "current_campaign" = c("contact", 
+                                                                    "day", 
+                                                                    "month", 
+                                                                    "duration",
+                                                                    "campaign"),
+                                              "previous_campaign" = c("pdays",
+                                                                      "previous",
+                                                                      "poutcome")))
+ 
+  plot(piv_rf_asp, piv_lr_asp, piv_xgb_asp)
+
+
+```
+Conclusions:
+  1. Current Campaign absolutely the most important
+  2. Second Previous Campaign
+  3. Rest is not so important
+
+
+
+##Global dependency profiles 
+
+###PDP
+PDP for duration from RF model
+
+```{r}
+  selected_cases100<-ingredients::select_sample(test, n = 100)
+  cp_rf <- ingredients::ceteris_paribus(explainer_rf, selected_cases100)
+  pdp_duration_cp_rf <- ingredients::aggregate_profiles(cp_rf, variables = "duration") 
+  plot(pdp_duration_cp_rf) + show_rugs(cp_rf, variables = "duration", color = "red")
+```
+Conclusions:
+  
+    1. Positive relation betweem duration time and PTD
+    2. After 1000+ it stops
+
+
+
+PDP for all numeric variables from RF model
+
+```{r}
+  pdp_all_cp_rf <- ingredients::aggregate_profiles(cp_rf,variable_type = "numerical") 
+  plot(pdp_all_cp_rf)
+```
+Conclusions:
+
+    1. Duration, pdays and age have visible influence
+    2. The rest - minor
+
+
+##PDP, ALE and CDP plots
+Comparison of PDP, ALE and ICE plots 
+
+```{r}
+  pdp_rf_p <- aggregate_profiles(cp_rf, variables = "duration", type = "partial")
+  pdp_rf_p$`_label_` <- "RF_partial"
+  pdp_rf_c <- aggregate_profiles(cp_rf, variables = "duration", type = "conditional")
+  pdp_rf_c$`_label_` <- "RF_conditional"
+  pdp_rf_a <- aggregate_profiles(cp_rf, variables = "duration", type = "accumulated")
+  pdp_rf_a$`_label_` <- "RF_accumulated"
+  
+  plot(pdp_rf_p, pdp_rf_c, pdp_rf_a, color = "_label_")
+  
+```
+Conclusions:
+
+    1. All profiles look similar - not a big problem with collinearity
+
+
+###Stability analysis of responses for Duration
+
+```{r}
+  plot(cp_rf, variables = "duration",color="lightgrey") +
+    show_observations(cp_rf, variables = "duration") +
+    show_rugs(cp_rf, variables = "duration", color = "red") +
+    show_aggregated_profiles(pdp_rf_p, size = 3, color = "_label_")
+```
+Conclusions:
+  
+    1. Profiles are generally stable
+    2. There is a group of profiles with delicately different behaviour.
+
+
+###Stability analysis of responses for Duration - wrt housnig groups
+
+```{r}
+
+pdp_duration_housing_cp_rf <- ingredients::aggregate_profiles(cp_rf, variables = "duration", groups="housing")
+  
+plot(cp_rf, variables = "duration",color="lightgrey") +
+  show_observations(cp_rf, variables = "duration") +
+  show_rugs(cp_rf, variables = "duration", color = "red") +
+  show_aggregated_profiles(pdp_duration_housing_cp_rf, size = 3, color="_label_")
+  
+```
+Conclusions:
+
+    1. Housing is not shifting PDP by a constant values (additive effects)
+
+
+
+###PDP and ALE plots for different models
+
+
+```{r}
+
+  pdp_duration_lr <- ingredients::partial_dependency(explainer_lr , variables = "duration")
+  pdp_duration_rf <- ingredients::partial_dependency(explainer_rf, variables = "duration")
+  pdp_duration_xgb <- ingredients::partial_dependency(explainer_xgb , variables = "duration")
+  
+  ale_duration_lr <- ingredients::accumulated_dependency(explainer_lr , variables = "duration")
+  ale_duration_rf <- ingredients::accumulated_dependency(explainer_rf, variables = "duration")
+  ale_duration_xgb <- ingredients::accumulated_dependency(explainer_xgb , variables = "duration")
+  
+```
+
+
+
+```{r}
+plot(pdp_duration_lr, pdp_duration_rf, pdp_duration_xgb)
+plot(ale_duration_lr, ale_duration_rf,ale_duration_xgb)
+  
+```
+  Conclusions
+    
+    1. LR is affected by outlier
+    2. RF and XGB have similar PDP
+
+###PDP profiles for Categorical data
+
+```{r}
+  pdp_all_cp_rf <- ingredients::aggregate_profiles(cp_rf,variable_type = "categorical") 
+  plot(pdp_all_cp_rf)
+```
+Conclusions:
+  
+    1. Month has the most different levels
+    2. Poutcome
+    3. Rest is less distinguishable
+
+```{r}
+  pdp_month_cp_rf <- ingredients::aggregate_profiles(cp_rf,variable_type = "categorical",variables= "month") 
+  plot(pdp_month_cp_rf)
+```
+
+###Using factorMerger to analyse PDP profiles deeper
+
+```{r}
+fmAll<-mergeFactors(test$class1,factor=test$month,method = "fast-adaptive",family="binomial")
+```
+
+
+```{r}
+plot(fmAll,panel="response")
+```
+  Conclusions:
+    
+    1. 6 siginifcantly different levels (4 ***)
+  
+  
+
+#Local explanation
+
+Let's imagine that we want to assess proponsity to buy of Johnny
+```{r}
+  johnny <-ingredients::select_sample(test, n = 1,seed=1916)
+
+  johnny
+  
+  
+```
+
+###Ceteris Paribus plots
+We are creating a CP profiles for Johnny based on different models
+```{r}
+  johnny_rf <- ingredients::ceteris_paribus(explainer_rf, johnny)
+  johnny_lr <- ingredients::ceteris_paribus(explainer_lr, johnny)
+  johnny_xgb <- ingredients::ceteris_paribus(explainer_xgb, johnny)
+  
+  johnny_rf
+```
+
+###CP profiles for numerical data is easy to present at one graph:
+  
+```{r}
+plot(johnny_lr,johnny_rf, johnny_xgb,color="_label_", variables = c("duration", "balance")) +
+    show_observations(johnny_lr,johnny_rf, johnny_xgb, variables = c("duration", "balance")) +
+      scale_color_discrete(name = "Selected models:") + ylim(0,1) +
+    ggtitle("Ceteris Paribus Profiles for Johnny")
+```
+Conclusions:
+  
+    1. Duration affects PTD - similar to average profile (noncolinear variable)
+    2. Balance has not sigificant influance
+    3. Here recomendation for Johnny is different to explain
+
+
+###For categorical data it is better to look at them separately:
+
+```{r}
+  plot(johnny_rf,color="_label_", variables = c("job", "marital")) +
+    ggtitle("Ceteris Paribus Profiles for Johnny")
+```
+Conclusions:
+ 
+    1. Back to school Johnny :)
+    3. Don't get married - take a divorce :)
+
+
+
+###Two-dimensional ceteris paribus plots - very useful in interactions identification
+ 
+```{r}
+ wi_rf_2d <- ceteris_paribus_2d(explainer_rf, observation = johnny_rf, variables = c("age", "duration","pdays"))
+  head(wi_rf_2d)
+  
+  plot(wi_rf_2d) + 
+    theme(legend.position = "right", legend.direction = "vertical") + ggtitle("Ceteris Paribus 2D Profiles")
+```  
+Conclusions:
+
+    1. Age and duration is additive
+    2. Pdays and age/duration - some interactions may be obseerved, but rather not crucial
+
+  
+##Local stability analysis
+  
+```{r}
+#selecting neighbours wrt duration and balance
+johnny_neighbors1 <- ingredients::select_neighbours(johnny, 
+                                                      test,
+                                                      n = 100,
+                                                      variables = c("duration", "month","contact","day"))
+johnny_neighbors1 %>% head(5)
+
+# cp for Johnny and neighbours
+
+cp_johnny <- ceteris_paribus(explainer_rf,
+                             johnny,
+                             variable_splits = list(duration = seq(0,3000,100)))
+
+cp_johnny_neighbors1 <- ceteris_paribus(explainer_rf,
+                                        johnny_neighbors1)
+
+```
+
+  
+  
+```{r}
+  plot(cp_johnny_neighbors1, color = '#ceced9', variables = "duration") +
+  show_profiles(cp_johnny, size = 2) +
+  show_observations(cp_johnny, variables = "duration", size = 5) +
+  ggtitle("Local stability plot for Johnny")
+
+```
+Conclusions:
+  
+    1. Model is very stable around Johnny
+
+
+###Oscilations - a method of assessment for local variable importance
+
+```{r}
+  oscillations_johnny_rf <- calculate_oscillations(johnny_rf)
+  oscillations_johnny_rf
+
+  
+  oscillations_johnny_rf$`_ids_` <- "Johnny"
+  plot(oscillations_johnny_rf) + ggtitle("Ceteris Paribus Oscillations")
+```
+  Conclusions:
+    
+      1. For Johnny the most important variable is month - not duration; 
+      2. Contact and duration 
+
+##Local feature importance for aspects
+
+Aspect Importance function takes a sample from a given dataset and modifies it. Modification is
+made by replacing part of its aspects by values from the observation. Then function is calculating
+the difference between the prediction made on modified sample and the original sample. Finally, it
+measures the impact of aspects on the change of prediction by using the linear model or lasso.
+
+```{r}
+
+  
+  aspects <- list(client = c("age",  "marital", "educ"),
+                  work = c("job","balance"),
+                  credit = c("def", "housing", "loan"),
+                  current_campaign = c("contact", "day", "month", "duration","campaign"),
+                  previous_campaign = c("pdays","previous","poutcome"))
+                  
+  
+  asp_fi<-aspect_importance(explainer_xgb,
+                    new_observation = johnny,
+                    aspects = aspects,
+                    N=1000)
+  
+  #ingredients::add_additional_information(explainer_xgb, johnny, aspects)
+  
+  plot(asp_fi)
+
+```
+Conclusions:
+
+    1. For johnny current campaign is still moste important and affects prognosis negativately
+    2. Pervious Campaign is 4th
+    3. Only positive aspect is client itself
+
+
+###BreakDown - method showing local contribution of variables
+
+```{r}
+bd_rf <- break_down(explainer_rf,
+                      johnny)
+bd_rf
+```
+ 
+  
+###BreakDown Plots 
+
+NO of variables defined automatically, most important variables chosen be modeller
+```{r}
+plot(bd_rf)
+plot(bd_rf, max_features = 3) 
+
+```
+Conclusions:
+
+Decrease:
+    
+    1. Duration=99  a PTS
+    2. contact=cellular (drop less significant then next one) - ordering by local importance
+    3. month=may
+
+All other factors less important
+
+
+Break Down plot with distribution of different orders
+  
+```{r}
+  bd_rf_order <- break_down(explainer_rf,
+                            johnny, keep_distributions=T)
+  plot(bd_rf_order, plot_distributions=T) 
+```
+Description:
+  
+    1. We are starting from the bottom (average prediction)
+    2. The most important change by duration (average change)
+    3. Second most important change by previous (average increase above duration)
+    4. Etc.
+
+BreakDown with interactions  
+ 
+```{r}
+ bd_rf_int <- break_down(explainer_rf,
+                            johnny, interactions=T)
+ plot(bd_rf_int)
+```
+Conclusions:
+  
+      1. Month and day are not additive (in previous BD drop over 7 pp and here less than 6 pp)
+      2. The others rather are additive
+   
+BreakDown Uncertainty Plot
+  
+```{r}
+
+ bd_rf_unc=break_down_uncertainty(explainer_rf, johnny, B = 25)
+  
+```
+
+```{r}
+
+plot(bd_rf_unc)
+
+```
+
+  Conclusions:
+  
+    1. Duration definietly negative influence
+    2. pdays and conact rather negative
+    3. potcome and previous positive
+  
+Shapley values plot
+  
+```{r}
+
+ shap_johny <- shap(explainer_rf, johnny, B = 25)
+ plot(shap_johny) 
+ 
+```
+
+  Conclusions:
+
+      1. On avarage duratio, month, contact and pdays are negative (but contact and pdays not always)
+      2. poutcome and previous are positive
+
+
+Lime like explanation plots 
+  
+```{r message=FALSE, warning=FALSE}
+
+  lime_rf <- lime::lime(test[,colnames(johnny)], RF)
+  lime_expl <- lime::explain(johnny, lime_rf, labels ="Success", n_features = 6, n_permutations = 10000)
+  lime_expl
+  
+  johnny$class
+  
+  #explain():
+  #n_features - how many features we want to look at
+  #n_labels - how many classes we want to explain 
+  
+  #how do we want to choose these features?
+  #The class, auto, uses forward selection if we chose n_features <= 6 
+  #and uses the features with highest weights otherwise. 
+  #We can also directly choose feature_select = "forward_selection",
+  #feature_select = "highest_weights" or feature_select = "lasso_path". 
+```
+
+
+```{r}
+ plot_features(lime_expl)
+```
+
+Conclusions:
+  
+    1. duration, balance and month have negative influence
+    2. age has a positive on
+    3. Different variables than previously 
+    4. Rather poor fit
+    5. White box fit to Black box fit to the Phenomenon
+
+
+
+ 
+
+  
+
+
